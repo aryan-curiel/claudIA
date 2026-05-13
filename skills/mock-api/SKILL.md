@@ -26,7 +26,7 @@ If context is a file path, read it. If a folder, read all `.md` files in it. Ext
 
 - **Project name** — infer from context (snake_case). If ambiguous, ask once before proceeding.
 - **Package name** — same as project name with hyphens replaced by underscores.
-- **Entities** — each entity has: name (PascalCase), fields with types, and which fields are filterable/sortable.
+- **Entities** — each entity has: name (PascalCase), fields with types, and which fields are filterable/sortable. When not provided, infer from context.
 
 ---
 
@@ -35,21 +35,68 @@ If context is a file path, read it. If a folder, read all `.md` files in it. Ext
 If a `pyproject.toml` exists in the current directory, skip project creation and go to Step 3. Otherwise:
 
 ```bash
-uv init <project-name> --app --python 3.13
+uv init <project-name> --app
 cd <project-name>
-uv add "fastapi[standard]>=0.115" "pydantic>=2.0"
-uv add --dev "ruff>=0.9" "ty>=0.0.1a0"
+uv add "fastapi[standard]" pydantic
+uv add --dev ruff ty
 ```
 
 Set `pyproject.toml` to include:
 
 ```toml
-[tool.ruff]
-line-length = 100
-target-version = "py313"
-
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP"]
+# See: https://docs.astral.sh/ruff/rules/
+select = [
+    "E4",   # pycodestyle errors - Import errors and indentation issues
+    "E7",   # pycodestyle errors - Statement issues (multiple statements on one line, etc.)
+    "E9",   # pycodestyle errors - Runtime errors (syntax errors, I/O errors)
+    "F",    # Pyflakes - General Python code quality (unused imports, undefined names, etc.)
+    "B",    # flake8-bugbear - Common bugs and design problems
+    "S",    # flake8-bandit - Security issues and vulnerabilities
+    "FAST", # FastAPI - FastAPI-specific best practices
+    "PERF", # Perflint - Performance anti-patterns
+    "T20",  # flake8-print - Detect print statements
+    "LOG",  # flake8-logging - Logging best practices
+    # "G",     # flake8-logging-format - Logging format string issues
+    "ASYNC", # flake8-async - Async/await best practices and common mistakes
+    "C90",   # mccabe - Complexity checks
+    "UP",
+]
+ignore = [
+    "PERF401", # manual-list-comprehension
+    "PERF403", # manual-dict-comprehension
+
+    "FAST001", # fast-api-redundant-response-model
+    "FAST002", # fast-api-non-annotated-dependency
+]
+
+[tool.ruff.lint.per-file-ignores]
+"test_*.py" = ["B011", "S101", "T20"]
+"**/tests/**/*.py" = ["B011", "C901", "S101", "S106", "T20"]
+"**/{docs,scripts,tests,tools}/*.py" = ["T20"]
+"**/migrations/versions/*.py" = ["T20", "E402"]
+"bootstrap/**/*.py" = ["T20", "S701"]
+"**/*.ipynb" = ["E402", "T20", "B007"]
+"**/project_management/cli/**/*.py" = ["T20", "ASYNC230"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 15
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Path",
+    "fastapi.Query",
+    "fastapi.Header",
+    "fastapi.Cookie",
+    "fastapi.Body",
+    "fastapi.Form",
+    "fastapi.File",
+    "fastapi.UploadFile",
+]
+
+[tool.ruff.format]
+line-ending = "lf"
 ```
 
 Remove the auto-generated `src/<package>/main.py` placeholder — you will create it from the template below.
@@ -157,10 +204,10 @@ Populate fields from the entity definition. `Update<Domain>Request` has all fiel
 
 ```python
 import uuid
-from enum import StrEnum
-from typing import Literal
+from typing import Annotated
 
-from pydantic import BaseModel, Field
+from fastapi import Query
+from pydantic import BaseModel
 
 
 class <Domain>Response(BaseModel):
@@ -178,16 +225,10 @@ class Update<Domain>Request(BaseModel):
     # --- all fields optional for partial update ---
 
 
-class <Domain>OrderField(StrEnum):
-    # one entry per sortable field, e.g.:
-    # CREATED_AT = "created_at"
-    # NAME = "name"
-    pass
-
-
 class <Domain>Ordering(BaseModel):
-    order_by: <Domain>OrderField | None = None
-    order_dir: Literal["asc", "desc"] = "asc"
+    # Each entry is a field name, optionally prefixed with "-" for descending.
+    # e.g. ordering=name&ordering=-created_at  →  sort by name asc, then created_at desc
+    ordering: Annotated[list[str], Query()] = []
 
 
 class <Domain>Filter(BaseModel):
@@ -243,11 +284,13 @@ class <Domain>MockRepository(
         for field, value in filters.model_dump(exclude_none=True).items():
             items = [i for i in items if getattr(i, field, None) == value]
 
-        # Apply ordering
-        if ordering.order_by is not None:
+        # Apply ordering — process fields right-to-left for stable multi-key sort
+        for field_expr in reversed(ordering.ordering):
+            descending = field_expr.startswith("-")
+            field_name = field_expr.lstrip("-")
             items.sort(
-                key=lambda x: (getattr(x, ordering.order_by) is None, getattr(x, ordering.order_by)),
-                reverse=ordering.order_dir == "desc",
+                key=lambda x, f=field_name: (getattr(x, f) is None, getattr(x, f)),
+                reverse=descending,
             )
 
         total = len(items)
