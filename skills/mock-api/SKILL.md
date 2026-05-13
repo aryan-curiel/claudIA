@@ -26,7 +26,15 @@ If context is a file path, read it. If a folder, read all `.md` files in it. Ext
 
 - **Project name** — infer from context (snake_case). If ambiguous, ask once before proceeding.
 - **Package name** — same as project name with hyphens replaced by underscores.
-- **Entities** — each entity has: name (PascalCase), fields with types, and which fields are filterable/sortable. When not provided, infer from context.
+- **Entities** — each entity has: name (PascalCase), fields with types, which fields are filterable/sortable, and whether it is **read-only**. When not provided, infer from context.
+
+**Read-only detection** — mark an entity as read-only if any of the following are true:
+- Explicitly described as read-only, immutable, a catalog, lookup table, or reference data
+- Only retrieval/query operations are mentioned (no create, update, or delete)
+- It represents configuration, status codes, or static reference values
+- It is a derived/computed resource that wouldn't be mutated directly
+
+Read-only entities get only `GET /` (list) and `GET /{id}` (retrieve) endpoints. They use a reduced abstract base and pre-seeded mock data instead of an empty store.
 
 ---
 
@@ -174,7 +182,9 @@ FilterT = TypeVar("FilterT")
 OrderT = TypeVar("OrderT")
 
 
-class AbstractRepository(ABC, Generic[EntityT, CreateT, UpdateT, FilterT, OrderT]):
+class ReadOnlyAbstractRepository(ABC, Generic[EntityT, FilterT, OrderT]):
+    """Base for entities that are never mutated through the API."""
+
     @abstractmethod
     async def get_by_id(self, id: uuid.UUID) -> EntityT | None: ...
 
@@ -185,6 +195,10 @@ class AbstractRepository(ABC, Generic[EntityT, CreateT, UpdateT, FilterT, OrderT
         filters: FilterT,
         ordering: OrderT,
     ) -> PaginatedResponse[EntityT]: ...
+
+
+class AbstractRepository(ReadOnlyAbstractRepository[EntityT, FilterT, OrderT], Generic[EntityT, CreateT, UpdateT, FilterT, OrderT]):
+    """Base for fully mutable entities."""
 
     @abstractmethod
     async def create(self, data: CreateT) -> EntityT: ...
@@ -413,6 +427,181 @@ async def delete_<domain>(
     deleted = await repo.delete(id)
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="<Domain> not found")
+```
+
+---
+
+## Read-only entity templates
+
+Use these instead of the full-CRUD templates above for any entity marked as read-only.
+
+---
+
+### `api/<domain>/dtos.py` (read-only)
+
+Omit Create/Update request models. Keep Response, Filter, and Ordering.
+
+```python
+import uuid
+from typing import Annotated
+
+from fastapi import Query
+from pydantic import BaseModel
+
+
+class <Domain>Response(BaseModel):
+    id: uuid.UUID
+    # --- entity fields ---
+
+    model_config = {"from_attributes": True}
+
+
+class <Domain>Ordering(BaseModel):
+    ordering: Annotated[list[str], Query()] = []
+
+
+class <Domain>Filter(BaseModel):
+    # optional filter fields, all None by default
+    pass
+```
+
+---
+
+### `repositories/<domain>_repository.py` (read-only)
+
+Extends `ReadOnlyAbstractRepository`. Pre-populate `_mock_store` with realistic seed data — at least 3–5 entries that match the entity's domain meaning.
+
+```python
+import uuid
+from typing import Annotated
+
+from fastapi import Depends
+
+from <package>.api.<domain>.dtos import (
+    <Domain>Filter,
+    <Domain>Ordering,
+    <Domain>Response,
+)
+from <package>.repositories.abstract import ReadOnlyAbstractRepository
+from <package>.shared.pagination import PaginatedResponse, PaginationParams
+
+_mock_store: dict[uuid.UUID, <Domain>Response] = {
+    # Pre-seeded with realistic data — replace UUIDs with uuid.uuid4() calls at module load
+    # or hardcode fixed UUIDs for stable test data.
+    # Example:
+    # _id := uuid.uuid4(): <Domain>Response(id=_id, ...)
+}
+
+# Seed at module load if store is empty
+def _seed() -> dict[uuid.UUID, <Domain>Response]:
+    entries = [
+        # <Domain>Response(id=uuid.uuid4(), <fields>),
+        # add 3-5 realistic entries based on domain context
+    ]
+    return {e.id: e for e in entries}
+
+_mock_store = _seed()
+
+
+class <Domain>MockRepository(
+    ReadOnlyAbstractRepository[
+        <Domain>Response,
+        <Domain>Filter,
+        <Domain>Ordering,
+    ]
+):
+    async def get_by_id(self, id: uuid.UUID) -> <Domain>Response | None:
+        return _mock_store.get(id)
+
+    async def list(
+        self,
+        pagination: PaginationParams,
+        filters: <Domain>Filter,
+        ordering: <Domain>Ordering,
+    ) -> PaginatedResponse[<Domain>Response]:
+        items = list(_mock_store.values())
+
+        for field, value in filters.model_dump(exclude_none=True).items():
+            items = [i for i in items if getattr(i, field, None) == value]
+
+        for field_expr in reversed(ordering.ordering):
+            descending = field_expr.startswith("-")
+            field_name = field_expr.lstrip("-")
+            items.sort(
+                key=lambda x, f=field_name: (getattr(x, f) is None, getattr(x, f)),
+                reverse=descending,
+            )
+
+        total = len(items)
+        page = items[pagination.offset : pagination.offset + pagination.limit]
+        return PaginatedResponse(
+            items=page,
+            total=total,
+            limit=pagination.limit,
+            offset=pagination.offset,
+        )
+
+
+def get_<domain>_repository() -> ReadOnlyAbstractRepository[
+    <Domain>Response,
+    <Domain>Filter,
+    <Domain>Ordering,
+]:
+    return <Domain>MockRepository()
+
+
+<Domain>RepoDep = Annotated[
+    ReadOnlyAbstractRepository[
+        <Domain>Response,
+        <Domain>Filter,
+        <Domain>Ordering,
+    ],
+    Depends(get_<domain>_repository),
+]
+```
+
+---
+
+### `api/<domain>/router.py` (read-only)
+
+List and retrieve only — no create, update, or delete.
+
+```python
+import uuid
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException, status
+
+from <package>.api.<domain>.dtos import (
+    <Domain>Filter,
+    <Domain>Ordering,
+    <Domain>Response,
+)
+from <package>.repositories.<domain>_repository import <Domain>RepoDep
+from <package>.shared.pagination import PaginatedResponse, PaginationParams
+
+router = APIRouter()
+
+
+@router.get("/", response_model=PaginatedResponse[<Domain>Response])
+async def list_<domains>(
+    pagination: Annotated[PaginationParams, Depends()],
+    filters: Annotated[<Domain>Filter, Depends()],
+    ordering: Annotated[<Domain>Ordering, Depends()],
+    repo: <Domain>RepoDep,
+) -> PaginatedResponse[<Domain>Response]:
+    return await repo.list(pagination=pagination, filters=filters, ordering=ordering)
+
+
+@router.get("/{id}", response_model=<Domain>Response)
+async def get_<domain>(
+    id: uuid.UUID,
+    repo: <Domain>RepoDep,
+) -> <Domain>Response:
+    entity = await repo.get_by_id(id)
+    if entity is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="<Domain> not found")
+    return entity
 ```
 
 ---
