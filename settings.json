@@ -1,0 +1,44 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "osascript -e \"display notification \\\"Task complete in $(basename $(pwd))\\\" with title \\\"Claude Code ✓\\\" sound name \\\"Glass\\\"\""
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "osascript -e \"display notification \\\"Needs your input — $(basename $(pwd))\\\" with title \\\"Claude Code 👋\\\" sound name \\\"Ping\\\"\""
+          }
+        ]
+      }
+    ]
+  },
+  "enabledPlugins": {
+    "pyright-lsp@claude-plugins-official": true,
+    "frontend-design@claude-plugins-official": true,
+    "atlassian@claude-plugins-official": true,
+    "Notion@claude-plugins-official": true,
+    "slack@claude-plugins-official": true,
+    "warp@claude-code-warp": true
+  },
+  "extraKnownMarketplaces": {
+    "claude-code-warp": {
+      "source": {
+        "source": "github",
+        "repo": "warpdotdev/claude-code-warp"
+      }
+    }
+  },
+  "remoteControlAtStartup": true,
+  "agentPushNotifEnabled": true
+}
