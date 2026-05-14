@@ -1,0 +1,16 @@
+# Remote skill catalog — add [[remote]] entries for skills hosted in external git repos.
+#
+# Fields:
+#   name        — unique identifier used as the symlink basename in .claude/skills/
+#   description — shown in the TUI next to the checkbox
+#   repo        — HTTPS or SSH git URL
+#   path        — path inside the repo to the skill directory (must contain SKILL.md)
+#   ref         — (optional) branch, tag, or commit SHA; omit to track the default branch
+
+# Example — uncomment and fill in to add a remote skill:
+# [[remote]]
+# name = "my-skill"
+# description = "Does something useful"
+# repo = "https://github.com/example-org/claude-skills"
+# path = "skills/my-skill"
+# ref = "main"
